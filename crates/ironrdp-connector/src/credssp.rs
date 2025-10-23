@@ -99,7 +99,21 @@ impl CredsspSequence {
     ) -> ConnectorResult<(Self, credssp::TsRequest)> {
         let credentials: sspi::Credentials = match &credentials {
             Credentials::UsernamePassword { username, password } => {
-                let username = Username::new(username, domain).map_err(|e| custom_err!("invalid username", e))?;
+                // Normalize username: if it looks like UPN (contains '@'), ignore provided domain
+                let (user_for_sspi, domain_used) = if username.contains('@') {
+                    (username.as_str(), None)
+                } else {
+                    (username.as_str(), domain)
+                };
+
+                let username = Username::new(user_for_sspi, domain_used)
+                    .map_err(|e| custom_err!("invalid username", e))?;
+
+                if let Some(dom) = domain_used {
+                    debug!(normalized_username = %format!("{}\\{}", dom, user_for_sspi), "Using DOMAIN\\username for CredSSP");
+                } else {
+                    debug!(normalized_username = %user_for_sspi, "Using UPN or bare username for CredSSP");
+                }
 
                 sspi::AuthIdentity {
                     username,
@@ -136,7 +150,9 @@ impl CredsspSequence {
 
         let server_name = server_name.into_inner();
 
+        // Build explicit RDP SPN to avoid DNS-based SPN discovery inside SSPI
         let service_principal_name = format!("TERMSRV/{}", &server_name);
+        debug!(server_name = %server_name, spn = %service_principal_name, "Using explicit SPN for CredSSP");
 
         let credssp_config: Box<dyn ProtocolConfig>;
         if let Some(ref krb_config) = kerberos_config {
